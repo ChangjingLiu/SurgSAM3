@@ -25,6 +25,7 @@ import os
 import argparse
 import yaml
 import json
+import shutil
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -49,7 +50,9 @@ from sam3.train.matcher import BinaryHungarianMatcherV2, BinaryOneToManyMatcher
 from sam3.train.data.collator import collate_fn_api
 from sam3.train.data.sam3_image_dataset import Datapoint, Image, Object, FindQueryLoaded, InferenceMetadata
 from sam3.model.box_ops import box_xywh_to_xyxy
-from lora_layers import LoRAConfig, apply_lora_to_model, save_lora_weights, count_parameters
+from lora_layers import LoRAConfig, apply_lora_to_model, save_lora_weights, load_lora_weights, count_parameters
+
+DEFAULT_SAM3_CHECKPOINT = "/mnt/data2_hdd/changjing/modelscope/facebook/sam3/sam3.pt"
 
 from torchvision.transforms import v2
 import pycocotools.mask as mask_utils  # Required for RLE mask decoding in COCO dataset
@@ -105,6 +108,109 @@ def print_rank0(*args, **kwargs):
     """Print only on rank 0."""
     if is_main_process():
         print(*args, **kwargs)
+
+
+def get_resume_path(config, out_dir=None):
+    """Return LoRA weights path for resume, if configured or auto-detected."""
+    training = config.get("training", {})
+    path = training.get("resume_from") or config.get("resume_from")
+    auto_resume = training.get("auto_resume", True)
+
+    if path in (None, "", "auto", "null"):
+        if auto_resume and out_dir is not None:
+            last_weights = Path(out_dir) / "last_lora_weights.pt"
+            if last_weights.exists():
+                return str(last_weights)
+        return None
+
+    return str(Path(path))
+
+
+def resolve_sam3_checkpoint_path(config) -> str:
+    """Resolve SAM3 base checkpoint from config (model.checkpoint_path)."""
+    model_cfg = config.get("model", {})
+    path = model_cfg.get("checkpoint_path") or model_cfg.get("checkpoint")
+    if path in (None, "", "null"):
+        return DEFAULT_SAM3_CHECKPOINT
+    path = str(Path(path).expanduser())
+    if not Path(path).exists():
+        raise FileNotFoundError(f"SAM3 checkpoint not found: {path}")
+    return path
+
+
+def save_training_config(
+    config: dict,
+    out_dir: Path,
+    source_config_path: str | None = None,
+) -> None:
+    """Write effective training config (and optional source copy) to output_dir."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(out_dir / "training_config.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
+
+    if source_config_path:
+        src = Path(source_config_path)
+        if src.is_file():
+            shutil.copy2(src, out_dir / "config_source.yaml")
+
+
+def resolve_start_epoch(config, val_stats_path, resume_path, cli_start_epoch=None):
+    """Return 0-based epoch index to resume from."""
+    training = config.get("training", {})
+
+    if cli_start_epoch is not None:
+        return cli_start_epoch
+
+    cfg_start = training.get("start_epoch", "auto")
+    if cfg_start not in (None, "auto"):
+        return int(cfg_start)
+
+    if resume_path:
+        inferred = infer_start_epoch_from_stats(val_stats_path)
+        if inferred > 0:
+            return inferred
+
+    return 0
+
+
+def load_best_val_loss_from_stats(val_stats_path):
+    """Read best validation loss from val_stats.json, if present."""
+    best = float("inf")
+    if not val_stats_path.exists():
+        return best
+    with open(val_stats_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            best = min(best, rec.get("val_loss", float("inf")))
+    return best
+
+
+def infer_start_epoch_from_stats(val_stats_path):
+    """Infer 0-based start epoch from the last completed epoch in val_stats.json."""
+    max_epoch = 0
+    if not val_stats_path.exists():
+        return 0
+    with open(val_stats_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            max_epoch = max(max_epoch, rec.get("epoch", 0))
+    return max_epoch
+
+
+@contextlib.contextmanager
+def maybe_autocast_bf16(enabled):
+    if enabled:
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            yield
+    else:
+        yield
 
 
 class COCOSegmentDataset(Dataset):
@@ -762,11 +868,20 @@ def create_coco_gt_from_dataset_original_res(dataset, image_ids=None, debug=Fals
 
 
 class SAM3TrainerNative:
-    def __init__(self, config_path, multi_gpu=False):
+    def __init__(self, config_path, multi_gpu=False, resume_from=None, start_epoch=None, sam3_checkpoint=None):
+        self._config_path = str(Path(config_path).resolve())
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
 
-        # Multi-GPU setup
+        if resume_from is not None:
+            self.config.setdefault("training", {})["resume_from"] = resume_from
+        self._cli_start_epoch = start_epoch
+        if start_epoch is not None:
+            self.config.setdefault("training", {})["start_epoch"] = start_epoch
+        if sam3_checkpoint is not None:
+            self.config.setdefault("model", {})["checkpoint_path"] = sam3_checkpoint
+
+        self._out_dir = Path(self.config["output"]["output_dir"])
         self.multi_gpu = multi_gpu
         self.local_rank = 0
         self.world_size = 1
@@ -780,11 +895,14 @@ class SAM3TrainerNative:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Build Model
+        checkpoint_path = resolve_sam3_checkpoint_path(self.config)
         print_rank0("Building SAM3 model...")
+        print_rank0(f"  Base checkpoint: {checkpoint_path}")
         self.model = build_sam3_image_model(
             device=self.device.type,
             compile=False,
-            load_from_HF=True,  # Tries to download from HF if checkpoint_path is None
+            checkpoint_path=checkpoint_path,
+            load_from_HF=False,  # Tries to download from HF if checkpoint_path is None
             bpe_path="sam3/assets/bpe_simple_vocab_16e6.txt.gz",
             eval_mode=False
         )
@@ -809,9 +927,16 @@ class SAM3TrainerNative:
         stats = count_parameters(self.model)
         print_rank0(f"Trainable params: {stats['trainable_parameters']:,} ({stats['trainable_percentage']:.2f}%)")
 
+        resume_path = get_resume_path(self.config, self._out_dir)
+        if resume_path:
+            if not Path(resume_path).exists():
+                raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+            print_rank0(f"Loading LoRA weights from {resume_path}")
+            load_lora_weights(self.model, resume_path)
+
         self.model.to(self.device)
 
-        # Wrap model with DDP if multi-GPU
+        # Multi-GPU setup
         if self.multi_gpu:
             self.model = DDP(
                 self.model,
@@ -830,6 +955,10 @@ class SAM3TrainerNative:
             lr=float(self.config["training"]["learning_rate"]),
             weight_decay=self.config["training"]["weight_decay"]
         )
+
+        mp = self.config.get("training", {}).get("mixed_precision", "no")
+        self.use_bf16 = mp in ("bf16", "bfloat16")
+        print_rank0(f"Mixed precision: {mp} (bf16 autocast={self.use_bf16})")
         
         # Matcher & Loss
         self.matcher = BinaryHungarianMatcherV2(
@@ -968,9 +1097,43 @@ class SAM3TrainerNative:
             "loss_dice": 5.0
         }
 
+        # Create output directory
+        out_dir = self._out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if is_main_process():
+            save_training_config(self.config, out_dir, self._config_path)
+            print_rank0(f"Saved training config to {out_dir / 'training_config.yaml'}")
+
         epochs = self.config["training"]["num_epochs"]
-        best_val_loss = float('inf')
-        print_rank0(f"Starting training for {epochs} epochs...")
+        resume_path = get_resume_path(self.config, out_dir)
+        val_stats_path = out_dir / "val_stats.json"
+        start_epoch = resolve_start_epoch(
+            self.config, val_stats_path, resume_path, cli_start_epoch=self._cli_start_epoch
+        )
+
+        if resume_path and start_epoch > 0:
+            completed = infer_start_epoch_from_stats(val_stats_path)
+            print_rank0(
+                f"Auto-resume: {completed} epoch(s) completed, "
+                f"continuing from epoch {start_epoch + 1}/{epochs}"
+            )
+        elif resume_path:
+            print_rank0(f"Auto-resume: loaded weights, starting from epoch 1/{epochs}")
+
+        if start_epoch >= epochs:
+            print_rank0(
+                f"start_epoch ({start_epoch}) >= num_epochs ({epochs}), nothing to train."
+            )
+            return
+
+        best_val_loss = load_best_val_loss_from_stats(val_stats_path)
+        if best_val_loss < float("inf"):
+            print_rank0(f"Restored best_val_loss={best_val_loss:.6f} from {val_stats_path}")
+
+        if start_epoch > 0:
+            print_rank0(f"Resuming training from epoch {start_epoch + 1}/{epochs}...")
+        else:
+            print_rank0(f"Starting training for {epochs} epochs...")
 
         if has_validation:
             print_rank0(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
@@ -998,11 +1161,7 @@ class SAM3TrainerNative:
                 return obj
             return obj
 
-        # Create output directory
-        out_dir = Path(self.config["output"]["output_dir"])
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        for epoch in range(epochs):
+        for epoch in range(start_epoch, epochs):
             # Set epoch for distributed sampler (required for proper shuffling)
             if self.multi_gpu and train_sampler is not None:
                 train_sampler.set_epoch(epoch)
@@ -1011,53 +1170,42 @@ class SAM3TrainerNative:
             train_losses = []
 
             # Only show progress bar on rank 0
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", disable=not is_main_process())
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", disable=not is_main_process())
             for batch_dict in pbar:
                 input_batch = batch_dict["input"]
 
                 # Move to device
                 input_batch = move_to_device(input_batch, self.device)
 
-                # Forward pass
-                # outputs_list is SAM3Output, we need to pass the whole thing to loss_wrapper
-                outputs_list = self.model(input_batch)
-
-                # Prepare targets for loss
-                # input_batch.find_targets is a list of BatchedFindTarget (one per stage)
-                find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
-
-                # Move targets to device
-                for targets in find_targets:
-                    for k, v in targets.items():
-                        if isinstance(v, torch.Tensor):
-                            targets[k] = v.to(self.device)
-
-                # Add matcher indices to outputs (required by Sam3LossWrapper)
-                # Use SAM3Output.iteration_mode to properly iterate over outputs
-                with SAM3Output.iteration_mode(
-                    outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
-                ) as outputs_iter:
-                    for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
-                        # stage_targets is a single target dict, replicate for all steps
-                        stage_targets_list = [stage_targets] * len(stage_outputs)
-                        for outputs, targets in zip(stage_outputs, stage_targets_list):
-                            # Compute indices for main output
-                            outputs["indices"] = self.matcher(outputs, targets)
-
-                            # Also add indices to auxiliary outputs if they exist
-                            if "aux_outputs" in outputs:
-                                for aux_out in outputs["aux_outputs"]:
-                                    aux_out["indices"] = self.matcher(aux_out, targets)
-
-                # Compute loss using Sam3LossWrapper
-                # This handles num_boxes calculation and proper weighting
-                loss_dict = self.loss_wrapper(outputs_list, find_targets)
-
-                # Extract total loss
-                total_loss = loss_dict[CORE_LOSS_KEY]
-
-                # Backward
                 self.optimizer.zero_grad()
+                with maybe_autocast_bf16(self.use_bf16):
+                    # Forward pass
+                    outputs_list = self.model(input_batch)
+
+                    # Prepare targets for loss
+                    find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
+
+                    # Move targets to device
+                    for targets in find_targets:
+                        for k, v in targets.items():
+                            if isinstance(v, torch.Tensor):
+                                targets[k] = v.to(self.device)
+
+                    # Add matcher indices to outputs (required by Sam3LossWrapper)
+                    with SAM3Output.iteration_mode(
+                        outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
+                    ) as outputs_iter:
+                        for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
+                            stage_targets_list = [stage_targets] * len(stage_outputs)
+                            for outputs, targets in zip(stage_outputs, stage_targets_list):
+                                outputs["indices"] = self.matcher(outputs, targets)
+                                if "aux_outputs" in outputs:
+                                    for aux_out in outputs["aux_outputs"]:
+                                        aux_out["indices"] = self.matcher(aux_out, targets)
+
+                    loss_dict = self.loss_wrapper(outputs_list, find_targets)
+                    total_loss = loss_dict[CORE_LOSS_KEY]
+
                 total_loss.backward()
                 self.optimizer.step()
 
@@ -1080,33 +1228,29 @@ class SAM3TrainerNative:
                         input_batch = batch_dict["input"]
                         input_batch = move_to_device(input_batch, self.device)
 
-                        # Forward pass
-                        outputs_list = self.model(input_batch)
+                        with maybe_autocast_bf16(self.use_bf16):
+                            outputs_list = self.model(input_batch)
 
-                        # Prepare targets
-                        find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
+                            find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
 
-                        # Move targets to device
-                        for targets in find_targets:
-                            for k, v in targets.items():
-                                if isinstance(v, torch.Tensor):
-                                    targets[k] = v.to(self.device)
+                            for targets in find_targets:
+                                for k, v in targets.items():
+                                    if isinstance(v, torch.Tensor):
+                                        targets[k] = v.to(self.device)
 
-                        # Add matcher indices to outputs (required by Sam3LossWrapper)
-                        with SAM3Output.iteration_mode(
-                            outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
-                        ) as outputs_iter:
-                            for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
-                                stage_targets_list = [stage_targets] * len(stage_outputs)
-                                for outputs, targets in zip(stage_outputs, stage_targets_list):
-                                    outputs["indices"] = self.matcher(outputs, targets)
-                                    if "aux_outputs" in outputs:
-                                        for aux_out in outputs["aux_outputs"]:
-                                            aux_out["indices"] = self.matcher(aux_out, targets)
+                            with SAM3Output.iteration_mode(
+                                outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
+                            ) as outputs_iter:
+                                for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
+                                    stage_targets_list = [stage_targets] * len(stage_outputs)
+                                    for outputs, targets in zip(stage_outputs, stage_targets_list):
+                                        outputs["indices"] = self.matcher(outputs, targets)
+                                        if "aux_outputs" in outputs:
+                                            for aux_out in outputs["aux_outputs"]:
+                                                aux_out["indices"] = self.matcher(aux_out, targets)
 
-                        # Compute loss using Sam3LossWrapper
-                        loss_dict = self.loss_wrapper(outputs_list, find_targets)
-                        total_loss = loss_dict[CORE_LOSS_KEY]
+                            loss_dict = self.loss_wrapper(outputs_list, find_targets)
+                            total_loss = loss_dict[CORE_LOSS_KEY]
 
                         val_losses.append(total_loss.item())
                         val_pbar.set_postfix({"val_loss": total_loss.item()})
@@ -1213,6 +1357,12 @@ def launch_distributed_training(args):
         "--device", *map(str, devices),
         "--_launched_by_torchrun"  # Internal flag to indicate we're in subprocess
     ]
+    if args.resume:
+        cmd.extend(["--resume", args.resume])
+    if args.start_epoch is not None:
+        cmd.extend(["--start_epoch", str(args.start_epoch)])
+    if args.checkpoint:
+        cmd.extend(["--checkpoint", args.checkpoint])
 
     # Set environment variable for visible devices
     env = os.environ.copy()
@@ -1243,6 +1393,10 @@ Examples:
 
   Multi-GPU (all 4 GPUs):
     python train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 0 1 2 3
+
+  Resume from checkpoint:
+    python train_sam3_lora_native.py --config configs/light_lora_config.yaml \\
+      --resume outputs/surgical_mix_lora_stride5/last_lora_weights.pt --start_epoch 3
         """
     )
     parser.add_argument(
@@ -1276,6 +1430,24 @@ Examples:
         action="store_true",
         help=argparse.SUPPRESS  # Hidden argument for internal use
     )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to SAM3 base checkpoint .pt (overrides config model.checkpoint_path)",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to LoRA weights (.pt) to resume training from (overrides config resume_from)",
+    )
+    parser.add_argument(
+        "--start_epoch",
+        type=int,
+        default=None,
+        help="0-based epoch index to resume from (overrides config start_epoch; epoch 4 = 3)",
+    )
     args = parser.parse_args()
 
     # Determine if multi-GPU training is requested
@@ -1294,5 +1466,11 @@ Examples:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device[0])
             print(f"Using single GPU: {args.device[0]}")
 
-        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu)
+        trainer = SAM3TrainerNative(
+            args.config,
+            multi_gpu=multi_gpu,
+            resume_from=args.resume,
+            start_epoch=args.start_epoch,
+            sam3_checkpoint=args.checkpoint,
+        )
         trainer.train()

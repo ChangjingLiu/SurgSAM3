@@ -5,6 +5,7 @@
 # Model settings
 model:
   name: "facebook/sam3"
+  checkpoint_path: "/mnt/data2_hdd/changjing/modelscope/facebook/sam3/sam3.pt"
   cache_dir: null
 
 # LoRA settings

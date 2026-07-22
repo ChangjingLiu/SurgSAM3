@@ -526,9 +526,25 @@ def _load_checkpoint(model, checkpoint_path):
         ckpt = torch.load(f, map_location="cpu", weights_only=True)
     if "model" in ckpt and isinstance(ckpt["model"], dict):
         ckpt = ckpt["model"]
-    sam3_image_ckpt = {
-        k.replace("detector.", ""): v for k, v in ckpt.items() if "detector" in k
-    }
+
+    has_detector_keys = any("detector" in k for k in ckpt)
+    if has_detector_keys:
+        # Official sam3.pt / video checkpoints: detector.backbone.*
+        sam3_image_ckpt = {
+            k.replace("detector.", ""): v for k, v in ckpt.items() if "detector" in k
+        }
+    elif any(k.startswith("backbone.") for k in ckpt):
+        # Image-only fine-tunes (e.g. Medical-SAM3 checkpoint_2D.pt): backbone.*
+        print(
+            f"Detected image-only checkpoint format (no detector. prefix) in "
+            f"{checkpoint_path}"
+        )
+        sam3_image_ckpt = {
+            k: v for k, v in ckpt.items() if not k.startswith("tracker.")
+        }
+    else:
+        sam3_image_ckpt = {}
+
     if model.inst_interactive_predictor is not None:
         sam3_image_ckpt.update(
             {
@@ -537,11 +553,11 @@ def _load_checkpoint(model, checkpoint_path):
                 if "tracker" in k
             }
         )
-    missing_keys, _ = model.load_state_dict(sam3_image_ckpt, strict=False)
-    if len(missing_keys) > 0:
+    missing_keys, unexpected_keys = model.load_state_dict(sam3_image_ckpt, strict=False)
+    if len(missing_keys) > 0 or len(unexpected_keys) > 0:
         print(
             f"loaded {checkpoint_path} and found "
-            f"missing and/or unexpected keys:\n{missing_keys=}"
+            f"missing and/or unexpected keys:\n{missing_keys=}\n{unexpected_keys=}"
         )
 
 

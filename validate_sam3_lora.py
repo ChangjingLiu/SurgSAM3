@@ -816,7 +816,8 @@ def validate(config_path, weights_path, val_data_dir, num_samples=None,
     model = build_sam3_image_model(
         device=device.type,
         compile=False,
-        load_from_HF=True,
+        checkpoint_path="/mnt/data2_hdd/changjing/modelscope/facebook/sam3/sam3.pt",
+        load_from_HF=False,
         bpe_path="sam3/assets/bpe_simple_vocab_16e6.txt.gz",
         eval_mode=False
     )
@@ -944,8 +945,10 @@ def validate(config_path, weights_path, val_data_dir, num_samples=None,
     print("RUNNING VALIDATION")
     print("="*80)
 
-    all_predictions = []
-    all_image_ids = []
+    coco_id_to_dataset_idx = {
+        img_id: idx for idx, img_id in enumerate(val_ds.image_ids)
+    }
+    predictions_by_idx: dict[int, dict] = {}
     val_losses = []
 
     # Use automatic mixed precision for faster inference
@@ -974,15 +977,29 @@ def validate(config_path, weights_path, val_data_dir, num_samples=None,
                 final_outputs = final_stage[-1]
 
                 batch_size_actual = final_outputs['pred_logits'].shape[0]
+                meta = input_batch.find_metadatas[0]
+                coco_ids = meta.coco_image_id.cpu().tolist()
+                if not isinstance(coco_ids, list):
+                    coco_ids = [coco_ids]
 
                 for i in range(batch_size_actual):
-                    img_id = batch_idx * batch_size + i
-                    all_image_ids.append(img_id)
-                    all_predictions.append({
+                    ds_idx = coco_id_to_dataset_idx[coco_ids[i]]
+                    pred_i = {
                         'pred_logits': final_outputs['pred_logits'][i].detach().cpu(),
                         'pred_boxes': final_outputs['pred_boxes'][i].detach().cpu(),
-                        'pred_masks': final_outputs['pred_masks'][i].detach().cpu()
-                    })
+                        'pred_masks': final_outputs['pred_masks'][i].detach().cpu(),
+                    }
+                    if ds_idx not in predictions_by_idx:
+                        predictions_by_idx[ds_idx] = pred_i
+                    else:
+                        for key in pred_i:
+                            predictions_by_idx[ds_idx][key] = torch.cat(
+                                [predictions_by_idx[ds_idx][key], pred_i[key]], dim=0
+                            )
+
+    sorted_idxs = sorted(predictions_by_idx.keys())
+    all_image_ids = sorted_idxs
+    all_predictions = [predictions_by_idx[k] for k in sorted_idxs]
 
     print(f"\nCollected predictions for {len(all_predictions)} images")
 

@@ -10,8 +10,8 @@ model:
 
 # LoRA settings - REDUCED for memory efficiency
 lora:
-  rank: 16                   # Reduced from 32 (less capacity but faster)
-  alpha: 32                  # 2x rank
+  rank: 32                   # Reduced from 32 (less capacity but faster)
+  alpha: 64                  # 2x rank
   dropout: 0.1
 
   # Target ONLY attention layers (skip MLP for memory savings)
@@ -60,7 +60,7 @@ training:
   gradient_accumulation_steps: 8  # Effective batch = 2 × 8 = 16
 
 output:
-  output_dir: "outputs_r16/surgical_mix_lora_stride5"
+  output_dir: "outputs_r32/surgical_mix_lora_stride5"
   logging_dir: "logs"
   save_lora_only: true
   push_to_hub: false

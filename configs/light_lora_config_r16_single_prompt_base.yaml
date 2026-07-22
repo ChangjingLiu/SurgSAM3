@@ -32,7 +32,7 @@ lora:
 
 # Training settings
 training:
-  data_dir: "/mnt/data2_hdd/changjing/SAM3_LoRA/datasets/surgical_mix_coco_stride5"
+  data_dir: "/mnt/data2_hdd/changjing/SAM3_LoRA/datasets/surgical_mix_coco_stride5_single_prompt"
   batch_size: 1         # Larger than full config (fewer LoRA params)
   num_workers: 2
 
@@ -60,7 +60,7 @@ training:
   gradient_accumulation_steps: 8  # Effective batch = 2 × 8 = 16
 
 output:
-  output_dir: "outputs_r16/surgical_mix_lora_stride5"
+  output_dir: "outputs_r16_single_prompt_base/surgical_mix_lora_stride5"
   logging_dir: "logs"
   save_lora_only: true
   push_to_hub: false
