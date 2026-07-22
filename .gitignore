@@ -43,10 +43,65 @@ ENV/
 
 # Training outputs
 outputs/
+outputs_r16_*/
+outputs_r32/
+outputs_radar/
 experiments/
 logs/
 checkpoints/
 dumps/
+
+# Local-only files (kept on disk, not published)
+Machinery.zip
+TRAIN_EVAL_COMMANDS.txt
+train_eval.sh
+infer.sh
+README.dataset.txt
+README.roboflow.txt
+CLI_TRAINING_GUIDE.md
+LORA_IMPLEMENTATION_GUIDE.md
+README_INFERENCE.md
+README_LORA_IMPLEMENTATION.md
+PROJECT_STRUCTURE.txt
+PROJECT_SUMMARY.md
+QUICK_SUMMARY.md
+diagnose_training.md
+asset/
+
+# Legacy / experimental scripts (kept locally)
+src/
+sam3_lora/
+sam3_lora_configs/
+train.py
+train_native.py
+train_simple.py
+train_standalone.py
+train_sam3_lora.py
+train_sam3_lora_with_categories.py
+inference.py
+inference_lora.py
+compare_lora_base.py
+compare_lora_base_batch.py
+plot_miou_radar.py
+plot_miou_radar_dirs.py
+eval_miou_medsam3.py
+infer_medsam3.py
+analyze_loss.py
+check_text_encoding.py
+verify_gt_transforms.py
+test_aux_outputs.py
+test_lora_injection.py
+convert_roboflow_to_coco.py
+prepare_data.py
+prepare_data_split.py
+quick_start.sh
+quickstart.sh
+run_5_image_comparison.sh
+loral.yaml
+
+# Non-default configs
+configs/*
+!configs/light_lora_config_r16_single_prompt_base.yaml
 
 # Data
 /data/

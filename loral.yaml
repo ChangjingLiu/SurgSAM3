@@ -1,4 +1,0 @@
-paths:
-  dataset_root: /workspace/Machinery       # Your dataset directory
-  experiment_log_dir: /path/to/experiments   # Where to save outputs
-  bpe_path: assets/bpe_simple_vocab_16e6.txt.gz  # BPE vocabulary
