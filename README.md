@@ -148,10 +148,14 @@ SurgSAM3/
 ## Citation
 
 ```bibtex
-@article{liu2026surgsam3,
-  title={Parameter-Efficient Adaptation of SAM3 for Prompt-Driven Surgical Concept Segmentation},
-  author={Liu, Changjing and others},
-  year={2026}
+@misc{liu2026parameterefficientadaptationsam3promptdriven,
+      title={Parameter-Efficient Adaptation of SAM3 for Prompt-Driven Surgical Concept Segmentation}, 
+      author={Changjing Liu and Yiming Huang and Beilei Cui and Liangjing Shao and Long Bai and Yanheng Li and Haoxuan Che and Hongliang Ren},
+      year={2026},
+      eprint={2607.23694},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2607.23694}, 
 }
 
 @software{sam3_lora,
