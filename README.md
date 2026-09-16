@@ -2,11 +2,14 @@
 
 <div align="center">
 
+[![Paper](https://img.shields.io/badge/Paper-arXiv%3A2607.23694-b31b1b.svg)](https://arxiv.org/abs/2607.23694)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
 **Parameter-Efficient Adaptation of SAM3 for Prompt-Driven Surgical Concept Segmentation**
+
+[arXiv:2607.23694](https://arxiv.org/abs/2607.23694) · Accepted at the **2nd MICCAI Workshop on Efficient Medical AI**
 
 [Installation](#installation) • [Quick Start](#quick-start) • [Training](#training) • [Evaluation](#evaluation) • [Citation](#citation)
 
@@ -16,7 +19,7 @@
 
 ## Overview
 
-**SurgSAM3** adapts [SAM3](https://huggingface.co/facebook/sam3) to multi-domain surgical segmentation using **LoRA**. Given a text prompt (e.g. `grasper`, `liver`), the model produces semantic masks for surgical instruments and anatomical structures.
+**SurgSAM3** adapts [SAM3](https://huggingface.co/facebook/sam3) to multi-domain surgical segmentation using **LoRA** ([paper](https://arxiv.org/abs/2607.23694)). Given a text prompt (e.g. `grasper`, `liver`), the model produces semantic masks for surgical instruments and anatomical structures.
 
 **Benchmarks:** [CholecSeg8k](https://github.com/ternaus/robotic-surgery-segmentation) · [EndoVis 2018](https://endovissub2018-roboticscenesegmentation.grand-challenge.org/) · [CaDIS](https://cataracts-semantic-segmentation.grand-challenge.org/)
 
@@ -147,15 +150,17 @@ SurgSAM3/
 
 ## Citation
 
+If you find this work useful, please cite:
+
 ```bibtex
-@misc{liu2026parameterefficientadaptationsam3promptdriven,
-      title={Parameter-Efficient Adaptation of SAM3 for Prompt-Driven Surgical Concept Segmentation}, 
-      author={Changjing Liu and Yiming Huang and Beilei Cui and Liangjing Shao and Long Bai and Yanheng Li and Haoxuan Che and Hongliang Ren},
-      year={2026},
-      eprint={2607.23694},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2607.23694}, 
+@misc{liu2026surgsam3,
+  title={Parameter-Efficient Adaptation of SAM3 for Prompt-Driven Surgical Concept Segmentation},
+  author={Changjing Liu and Yiming Huang and Beilei Cui and Liangjing Shao and Long Bai and Yanheng Li and Haoxuan Che and Hongliang Ren},
+  year={2026},
+  eprint={2607.23694},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  url={https://arxiv.org/abs/2607.23694}
 }
 
 @software{sam3_lora,
@@ -176,6 +181,6 @@ Apache 2.0 — see [LICENSE](LICENSE). SAM3 weights are subject to Meta's Huggin
 
 <div align="center">
 
-**Repository:** https://github.com/ChangjingLiu/SurgSAM3
+**Repository:** https://github.com/ChangjingLiu/SurgSAM3 · **Paper:** https://arxiv.org/abs/2607.23694
 
 </div>
